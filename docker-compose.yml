@@ -1,0 +1,26 @@
+services:
+  db:
+    image: postgres:16
+    container_name: hotel-bookings-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: app_admin
+      POSTGRES_PASSWORD: app_password
+      POSTGRES_DB: hotel_bookings
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      # postgres only runs *.sql/*.sh files that live directly in
+      # /docker-entrypoint-initdb.d (not in subfolders), so migrations and
+      # seed files are bind-mounted individually, in run order.
+      - ./db/migrations/001_init.sql:/docker-entrypoint-initdb.d/01_init.sql
+      - ./db/seed/seed.sql:/docker-entrypoint-initdb.d/02_seed.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app_admin -d hotel_bookings"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  db_data:

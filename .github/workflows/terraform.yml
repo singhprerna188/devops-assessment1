@@ -1,0 +1,106 @@
+name: Terraform
+
+on:
+  pull_request:
+    paths:
+      - "infra/**"
+      - ".github/workflows/terraform.yml"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  terraform:
+    name: Terraform (${{ matrix.env }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [dev, prod]
+
+    defaults:
+      run:
+        working-directory: infra/envs/${{ matrix.env }}
+
+    env:
+      # Dummy credentials so `plan` can run without real AWS access.
+      # Real pipelines would use OIDC / configured secrets instead.
+      AWS_ACCESS_KEY_ID: "dummy-access-key"
+      AWS_SECRET_ACCESS_KEY: "dummy-secret-key"
+      AWS_DEFAULT_REGION: "ap-south-1"
+      TF_VAR_db_password: ${{ secrets.TF_VAR_DB_PASSWORD || 'ci-plan-only-placeholder' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.5"
+
+      - name: Terraform fmt (check)
+        id: fmt
+        run: terraform fmt -check -recursive ../../..
+        continue-on-error: true
+
+      - name: Terraform init (no backend, plan-only)
+        id: init
+        # backend=false so the workflow doesn't need real S3/DynamoDB
+        # credentials just to produce a plan for review.
+        run: terraform init -backend=false
+
+      - name: Terraform validate
+        id: validate
+        run: terraform validate
+
+      - name: Terraform plan
+        id: plan
+        run: |
+          terraform plan \
+            -var-file="${{ matrix.env }}.tfvars" \
+            -input=false \
+            -no-color \
+            -out=tfplan | tee plan_output.txt
+        continue-on-error: true
+
+      - name: Save plan output
+        if: always()
+        run: |
+          {
+            echo "### Terraform fmt: ${{ steps.fmt.outcome }}"
+            echo "### Terraform validate: ${{ steps.validate.outcome }}"
+            echo "### Terraform plan: ${{ steps.plan.outcome }}"
+            echo ""
+            echo '```'
+            tail -c 60000 plan_output.txt || true
+            echo '```'
+          } > pr_comment_${{ matrix.env }}.md
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: terraform-plan-${{ matrix.env }}
+          path: infra/envs/${{ matrix.env }}/pr_comment_${{ matrix.env }}.md
+
+      - name: Comment plan on PR
+        uses: actions/github-script@v7
+        if: always()
+        with:
+          script: |
+            const fs = require('fs');
+            const path = `infra/envs/${{ matrix.env }}/pr_comment_${{ matrix.env }}.md`;
+            const body = fs.readFileSync(path, 'utf8');
+            const header = `## Terraform Plan — ${{ matrix.env }}\n\n`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: header + body,
+            });
+
+      - name: Fail job if validate or plan failed
+        if: steps.validate.outcome == 'failure' || steps.plan.outcome == 'failure'
+        run: exit 1
