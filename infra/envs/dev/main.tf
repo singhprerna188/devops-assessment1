@@ -1,3 +1,4 @@
+#echo test
 module "network" {
   source = "../../modules/network"
 
